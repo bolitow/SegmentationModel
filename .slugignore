@@ -5,3 +5,10 @@ tests/
 *.md
 docs/
 examples/
+.idea/
+*.log
+.DS_Store
+node_modules/
+.pytest_cache/
+.coverage
+*.egg-info/
