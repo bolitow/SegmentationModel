@@ -1,7 +1,7 @@
 fastapi
 uvicorn[standard]
 pillow
-tflite-runtime
+tensorflow==2.15.0
 python-multipart
 scikit-learn
 streamlit
