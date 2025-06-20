@@ -1,7 +1,7 @@
 fastapi
 uvicorn[standard]
 pillow
-tensorflow-lite
+tensorflow-cpu
 python-multipart
 scikit-learn
 streamlit
