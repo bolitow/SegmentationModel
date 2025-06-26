@@ -51,44 +51,6 @@ def get_current_model():
     return loaded_models.get(current_model_name) if current_model_name else None
 
 
-DATA_DIR = os.getenv("DATA_DIR", "data")  # images & masques GT
-
-# 1) Palette Cityscapes trainId (25 couleurs indexées 0…24)
-CITYSCAPES_TRAINID_PALETTE = [
-    (128, 64, 128),  # 0 road
-    (244, 35, 232),  # 1 sidewalk
-    (250, 170, 160),  # 2 parking
-    (230, 150, 140),  # 3 rail track
-    (70, 70, 70),  # 4 building
-    (102, 102, 156),  # 5 wall
-    (190, 153, 153),  # 6 fence
-    (180, 165, 180),  # 7 guard rail
-    (150, 100, 100),  # 8 bridge
-    (150, 120, 90),  # 9 tunnel
-    (153, 153, 153),  # 10 pole
-    (153, 153, 153),  # 11 polegroup
-    (250, 170, 30),  # 12 traffic light
-    (220, 220, 0),  # 13 traffic sign
-    (107, 142, 35),  # 14 vegetation
-    (152, 251, 152),  # 15 terrain
-    (70, 130, 180),  # 16 sky
-    (220, 20, 60),  # 17 person
-    (255, 0, 0),  # 18 rider
-    (0, 0, 142),  # 19 car
-    (0, 0, 70),  # 20 truck
-    (0, 60, 100),  # 21 bus
-    (0, 80, 100),  # 22 train
-    (0, 0, 230),  # 23 motorcycle
-    (119, 11, 32),  # 24 bicycle
-]
-
-# 1) Aplatir la liste de tuples en une seule liste d'entiers
-flat_palette = []
-for color in CITYSCAPES_TRAINID_PALETTE:
-    flat_palette.extend(color)
-flat_palette.extend([0] * (256 * 3 - len(flat_palette)))
-
-
 def preprocess(img: Image.Image) -> np.ndarray:
     img = img.resize(IMG_SIZE, Image.BILINEAR)
     arr = np.asarray(img, dtype=np.float32) / 255.0
@@ -96,32 +58,109 @@ def preprocess(img: Image.Image) -> np.ndarray:
 
 
 def postprocess(mask: np.ndarray, image_id: str) -> Image.Image:
+    """
+    Convertit la sortie du modèle en image masque avec la palette appropriée
+    """
     mask = np.squeeze(mask)
     if mask.ndim == 3:
         mask = np.argmax(mask, axis=-1)
     mask = mask.astype(np.uint8)
-
+    
+    # Créer l'image en mode palette
     pred = Image.fromarray(mask, mode="P")
-
-    # Correction : chercher le bon fichier GT
+    
+    # Essayer de récupérer la palette depuis le masque GT
     gt_path = os.path.join(DATA_DIR, "masks", f"{image_id}.png")
+    palette_applied = False
+    
     if os.path.exists(gt_path):
         try:
             gt = Image.open(gt_path)
-            if gt.mode == 'P':  # Si le GT est déjà en mode palette
+            
+            # Si le GT est en mode palette, récupérer sa palette
+            if gt.mode == 'P':
                 palette = gt.getpalette()
                 if palette:
                     pred.putpalette(palette)
-                else:
-                    pred.putpalette(flat_palette)
-            else:  # Si le GT est en RGB, utiliser la palette statique
-                pred.putpalette(flat_palette)
+                    palette_applied = True
+                    print(f"Palette récupérée depuis le GT pour {image_id}")
+            
+            # Si le GT est en RGB, on doit extraire la palette
+            elif gt.mode == 'RGB':
+                # Convertir en array numpy
+                gt_array = np.array(gt)
+                
+                # Trouver toutes les couleurs uniques
+                unique_colors = {}
+                gt_indexed = np.zeros((gt.size[1], gt.size[0]), dtype=np.uint8)
+                
+                # Créer un mapping couleur -> index
+                for y in range(gt_array.shape[0]):
+                    for x in range(gt_array.shape[1]):
+                        color = tuple(gt_array[y, x])
+                        if color not in unique_colors:
+                            unique_colors[color] = len(unique_colors)
+                        gt_indexed[y, x] = unique_colors[color]
+                
+                # Créer la palette à partir des couleurs uniques
+                palette = []
+                for i in range(256):
+                    if i < len(unique_colors):
+                        color = list(unique_colors.keys())[i]
+                        palette.extend(color)
+                    else:
+                        palette.extend([0, 0, 0])
+                
+                pred.putpalette(palette)
+                palette_applied = True
+                print(f"Palette extraite du GT RGB pour {image_id}")
+                
         except Exception as e:
             print(f"Erreur lors de la récupération de la palette: {e}")
-            pred.putpalette(flat_palette)
-    else:
+    
+    # Si aucune palette n'a pu être appliquée, créer une palette par défaut
+    if not palette_applied:
+        # Palette de secours basée sur ce qui semble être dans votre image
+        # (vous pouvez ajuster ces couleurs selon vos besoins)
+        default_palette = [
+            (128, 64, 128),   # 0 - route (violet)
+            (244, 35, 232),   # 1 - trottoir (rose)
+            (70, 70, 70),     # 2 - bâtiment (gris foncé)
+            (102, 102, 156),  # 3 - mur (gris bleu)
+            (107, 142, 35),   # 4 - végétation (vert)
+            (152, 251, 152),  # 5 - terrain (vert clair)
+            (70, 130, 180),   # 6 - ciel (bleu)
+            (220, 20, 60),    # 7 - personne (rouge)
+            (0, 0, 142),      # 8 - voiture (bleu foncé)
+            (0, 0, 70),       # 9 - camion (bleu très foncé)
+            (0, 60, 100),     # 10 - bus (bleu foncé)
+            (0, 0, 230),      # 11 - moto (bleu)
+            (119, 11, 32),    # 12 - vélo (bordeaux)
+            (250, 170, 30),   # 13 - feu de circulation (jaune)
+            (220, 220, 0),    # 14 - panneau (jaune)
+            (190, 153, 153),  # 15 - clôture (gris rosé)
+            (153, 153, 153),  # 16 - poteau (gris)
+            (180, 165, 180),  # 17 - barrière (gris clair)
+            (150, 100, 100),  # 18 - pont (brun)
+            (150, 120, 90),   # 19 - tunnel (brun clair)
+            (250, 170, 160),  # 20 - parking (rose clair)
+            (255, 0, 0),      # 21 - cycliste (rouge vif)
+            (0, 80, 100),     # 22 - train (bleu-vert)
+            (230, 150, 140),  # 23 - rail (rose-brun)
+            (0, 0, 0),        # 24 - autre (noir)
+        ]
+        
+        # Créer la palette complète (256 couleurs)
+        flat_palette = []
+        for i in range(256):
+            if i < len(default_palette):
+                flat_palette.extend(default_palette[i])
+            else:
+                flat_palette.extend([0, 0, 0])
+        
         pred.putpalette(flat_palette)
-
+        print(f"Palette par défaut appliquée pour {image_id}")
+    
     return pred
 
 
@@ -131,11 +170,11 @@ def calculate_metrics(gt_mask: np.ndarray, pred_mask: np.ndarray) -> Dict[str, f
     pred_flat = pred_mask.flatten()
 
     accuracy = accuracy_score(gt_flat, pred_flat)
-    iou = jaccard_score(gt_flat, pred_flat, average='weighted')
+    iou = jaccard_score(gt_flat, pred_flat, average='weighted', zero_division=0)
 
     return {
-        "accuracy": accuracy,
-        "iou": iou
+        "accuracy": float(accuracy),
+        "iou": float(iou)
     }
 
 
@@ -147,7 +186,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # front Streamlit hébergé ailleurs
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -191,7 +230,8 @@ def get_image(image_id: str):
     path = os.path.join(DATA_DIR, "images", f"{image_id}.png")
     if not os.path.exists(path):
         raise HTTPException(404, "Image inconnue")
-    return Response(open(path, "rb").read(), media_type="image/png")
+    with open(path, "rb") as f:
+        return Response(f.read(), media_type="image/png")
 
 
 @app.get("/masks/{image_id}")
@@ -199,7 +239,8 @@ def get_gt_mask(image_id: str):
     path = os.path.join(DATA_DIR, "masks", f"{image_id}.png")
     if not os.path.exists(path):
         raise HTTPException(404, "Masque GT inconnu")
-    return Response(open(path, "rb").read(), media_type="image/png")
+    with open(path, "rb") as f:
+        return Response(f.read(), media_type="image/png")
 
 
 @app.post("/predict")
@@ -214,11 +255,16 @@ async def predict(file: UploadFile = File(...)):
     raw = await file.read()
     img = Image.open(io.BytesIO(raw)).convert("RGB")
     x = preprocess(img)
+    
+    # Prédiction
     y = model.predict(x, verbose=0)
+    
+    # Post-traitement avec récupération de la palette
     mask_img = postprocess(y, image_id)
 
     buf = io.BytesIO()
     mask_img.save(buf, format="PNG")
+    buf.seek(0)
     return Response(buf.getvalue(), media_type="image/png")
 
 
@@ -249,7 +295,7 @@ async def predict_with_metrics(file: UploadFile = File(...)):
 
     result = {
         "model_used": current_model_name,
-        "prediction_time": prediction_time,
+        "prediction_time": float(prediction_time),
     }
 
     # Essayer de calculer les métriques si le GT existe
@@ -257,7 +303,18 @@ async def predict_with_metrics(file: UploadFile = File(...)):
     if os.path.exists(gt_path):
         try:
             gt_img = Image.open(gt_path)
-            gt_mask = np.array(gt_img.resize(IMG_SIZE, Image.NEAREST))
+            
+            # Si le GT est en mode P, on peut directement récupérer les indices
+            if gt_img.mode == 'P':
+                gt_mask = np.array(gt_img.resize(IMG_SIZE, Image.NEAREST))
+            else:
+                # Si c'est en RGB, il faut le convertir en indices
+                # Cette partie pourrait nécessiter un ajustement selon votre format exact
+                gt_img = gt_img.resize(IMG_SIZE, Image.NEAREST)
+                gt_mask = np.array(gt_img)
+                # Conversion RGB vers indices (à adapter selon votre mapping)
+                # Pour l'instant, on suppose que le GT est déjà en mode P
+                raise ValueError("GT en mode RGB non supporté pour les métriques")
 
             metrics = calculate_metrics(gt_mask, pred_mask)
             result["metrics"] = metrics
@@ -267,3 +324,55 @@ async def predict_with_metrics(file: UploadFile = File(...)):
         result["metrics"] = {"error": "Ground truth non disponible"}
 
     return result
+
+
+@app.get("/debug/palette/{image_id}")
+def debug_palette(image_id: str):
+    """Endpoint de debug pour vérifier la palette d'un masque GT"""
+    gt_path = os.path.join(DATA_DIR, "masks", f"{image_id}.png")
+    if not os.path.exists(gt_path):
+        raise HTTPException(404, "Masque GT inconnu")
+    
+    gt = Image.open(gt_path)
+    info = {
+        "mode": gt.mode,
+        "size": gt.size,
+    }
+    
+    if gt.mode == 'P':
+        palette = gt.getpalette()
+        if palette:
+            # Afficher les 25 premières couleurs de la palette
+            colors = []
+            for i in range(min(25, len(palette)//3)):
+                r = palette[i*3]
+                g = palette[i*3 + 1]
+                b = palette[i*3 + 2]
+                colors.append(f"Index {i}: RGB({r}, {g}, {b})")
+            info["palette_colors"] = colors
+            
+            # Trouver les indices utilisés dans l'image
+            gt_array = np.array(gt)
+            unique_indices = np.unique(gt_array)
+            info["used_indices"] = unique_indices.tolist()
+    
+    elif gt.mode == 'RGB':
+        # Analyser les couleurs uniques
+        gt_array = np.array(gt)
+        unique_colors = {}
+        for y in range(gt_array.shape[0]):
+            for x in range(gt_array.shape[1]):
+                color = tuple(gt_array[y, x])
+                if color not in unique_colors:
+                    unique_colors[color] = 0
+                unique_colors[color] += 1
+        
+        # Trier par fréquence
+        sorted_colors = sorted(unique_colors.items(), key=lambda x: x[1], reverse=True)
+        info["unique_colors"] = [
+            f"RGB{color}: {count} pixels" 
+            for color, count in sorted_colors[:25]
+        ]
+        info["total_unique_colors"] = len(unique_colors)
+    
+    return info
