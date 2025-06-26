@@ -103,18 +103,25 @@ def postprocess(mask: np.ndarray, image_id: str) -> Image.Image:
 
     pred = Image.fromarray(mask, mode="P")
 
-    # tentative de copier la palette du GT coloré…
-    gt_path = os.path.join(DATA_DIR, "masks", f"{image_id}_gtFine_color.png")
+    # Correction : chercher le bon fichier GT
+    gt_path = os.path.join(DATA_DIR, "masks", f"{image_id}.png")
     if os.path.exists(gt_path):
-        gt = Image.open(gt_path)
-        palette = gt.getpalette()
-        if palette is None:
-            # si None (mode RGB), on retombe sur la palette statique
-            palette = flat_palette
+        try:
+            gt = Image.open(gt_path)
+            if gt.mode == 'P':  # Si le GT est déjà en mode palette
+                palette = gt.getpalette()
+                if palette:
+                    pred.putpalette(palette)
+                else:
+                    pred.putpalette(flat_palette)
+            else:  # Si le GT est en RGB, utiliser la palette statique
+                pred.putpalette(flat_palette)
+        except Exception as e:
+            print(f"Erreur lors de la récupération de la palette: {e}")
+            pred.putpalette(flat_palette)
     else:
-        palette = flat_palette
+        pred.putpalette(flat_palette)
 
-    pred.putpalette(palette)
     return pred
 
 
