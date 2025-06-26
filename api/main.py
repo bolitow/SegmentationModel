@@ -10,10 +10,17 @@ from sklearn.metrics import jaccard_score, accuracy_score
 import time
 
 # ──────────────────────────────────────────────
-# Chargement des modèles disponibles
+# Configuration pour Azure App Service
 # ──────────────────────────────────────────────
-MODELS_DIR = os.getenv("MODELS_DIR", "models")
-IMG_SIZE = (1024, 512)  # même taille que dans le notebook
+BASE_DIR = Path(__file__).parent.parent  # Racine du projet
+MODELS_DIR = os.getenv("MODELS_DIR", str(BASE_DIR / "api" / "models"))
+DATA_DIR = os.getenv("DATA_DIR", str(BASE_DIR / "api" / "data"))
+IMG_SIZE = (1024, 512)
+
+print(f"BASE_DIR: {BASE_DIR}")
+print(f"MODELS_DIR: {MODELS_DIR}")
+print(f"DATA_DIR: {DATA_DIR}")
+print(f"Modèles trouvés: {glob.glob(os.path.join(MODELS_DIR, '*.keras'))}")
 
 # Dictionnaire des modèles chargés
 loaded_models = {}
