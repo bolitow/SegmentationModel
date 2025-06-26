@@ -12,9 +12,14 @@ import time
 # ──────────────────────────────────────────────
 # Chargement des modèles disponibles
 # ──────────────────────────────────────────────
-MODELS_DIR = os.getenv("MODELS_DIR", "models")
-IMG_SIZE = (1024, 512)  # même taille que dans le notebook
 
+# Détection de l'environnement
+BASE_DIR = Path(__file__).parent.parent  # Racine du projet
+MODELS_DIR = os.getenv("MODELS_DIR", str(BASE_DIR / "api" / "models"))
+DATA_DIR = os.getenv("DATA_DIR", str(BASE_DIR / "api" / "data"))
+IMG_SIZE = (1024, 512)
+
+# Reste du code inchangé...
 # Dictionnaire des modèles chargés
 loaded_models = {}
 current_model_name = None
