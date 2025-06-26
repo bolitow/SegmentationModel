@@ -15,7 +15,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          lfs: true  # Important pour les gros fichiers comme les modèles
+          lfs: true
+
+      - name: Git LFS Pull
+        run: |
+          git lfs install
+          git lfs pull
 
       - name: Set up Python version
         uses: actions/setup-python@v5
