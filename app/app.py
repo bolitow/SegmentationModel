@@ -50,13 +50,6 @@ with st.sidebar:
             color_box = f'<div style="display:inline-block;width:20px;height:20px;background-color:{color_hex};margin-right:10px;vertical-align:middle;"></div>'
             st.markdown(f"{color_box} {class_info['index']}: {class_info['name']}", unsafe_allow_html=True)
 
-        # Bouton pour afficher le mapping complet
-        if st.button("Voir le mapping Cityscapes → Macro-classes"):
-            with st.expander("Mapping détaillé"):
-                mapping = classes_info.get('cityscapes_to_macro_mapping', {})
-                for cs_id, info in mapping.items():
-                    st.write(f"ID {cs_id} → Classe {info['macro_class_id']} ({info['macro_class_name']})")
-
 # Section principale : Sélection du modèle
 st.header("1. Sélection du modèle")
 col1, col2 = st.columns([3, 1])

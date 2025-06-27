@@ -404,24 +404,35 @@ def get_gt_mask(image_id: str):
         # Lire le masque GT
         gt_img = Image.open(path)
         
-        # Convertir le masque
-        gt_array = np.array(gt_img)
+        # Debug: afficher les informations sur l'image
+        print(f"DEBUG: Image path: {path}")
+        print(f"DEBUG: Image mode: {gt_img.mode}")
+        print(f"DEBUG: Image size: {gt_img.size}")
         
-        # Si l'image a 3 canaux (RGB), prendre seulement le premier canal ou convertir
-        if gt_array.ndim == 3:
-            if gt_array.shape[2] == 3:
-                # Pour les masques colorés, convertir en niveaux de gris
-                gt_array = gt_array[:, :, 0]  # Prendre le canal rouge comme référence
-            else:
-                gt_array = gt_array.squeeze()
+        # Convertir l'image en mode approprié selon son type
+        if gt_img.mode == 'RGB' or gt_img.mode == 'RGBA':
+            # Pour les images RGB/RGBA (masques colorés), convertir en mode L (grayscale)
+            gt_img = gt_img.convert('L')
+        elif gt_img.mode == 'P':
+            # Si c'est déjà une image palette, la convertir en mode L pour traitement
+            gt_img = gt_img.convert('L')
+        
+        # Convertir en array numpy
+        gt_array = np.array(gt_img)
+        print(f"DEBUG: Array shape après conversion: {gt_array.shape}")
+        print(f"DEBUG: Array min/max: {gt_array.min()}/{gt_array.max()}")
+        
+        # S'assurer que c'est bien un array 2D
+        if gt_array.ndim != 2:
+            print(f"ERROR: Array has {gt_array.ndim} dimensions, expected 2")
+            gt_array = gt_array.squeeze()
+            if gt_array.ndim != 2:
+                raise ValueError(f"Impossible de convertir l'array en 2D. Shape: {gt_array.shape}")
         
         # Si c'est un masque Cityscapes original, le convertir en 8 classes
         if gt_array.max() > 7:
+            print("DEBUG: Converting Cityscapes IDs to 8 classes")
             gt_array = convert_gt_to_8_classes(gt_array)
-        
-        # S'assurer que le masque est 2D
-        if gt_array.ndim > 2:
-            gt_array = gt_array.squeeze()
         
         # Créer une nouvelle image avec la palette 8 classes
         gt_8classes = Image.fromarray(gt_array.astype(np.uint8), mode='P')
@@ -434,6 +445,10 @@ def get_gt_mask(image_id: str):
         return Response(buf.getvalue(), media_type="image/png")
         
     except Exception as e:
+        print(f"ERROR: Exception type: {type(e).__name__}")
+        print(f"ERROR: Exception message: {str(e)}")
+        import traceback
+        print(f"ERROR: Traceback: {traceback.format_exc()}")
         raise HTTPException(500, f"Erreur lors du traitement du masque: {str(e)}")
 
 @app.post("/predict")
