@@ -407,9 +407,21 @@ def get_gt_mask(image_id: str):
         # Convertir le masque
         gt_array = np.array(gt_img)
         
+        # Si l'image a 3 canaux (RGB), prendre seulement le premier canal ou convertir
+        if gt_array.ndim == 3:
+            if gt_array.shape[2] == 3:
+                # Pour les masques colorés, convertir en niveaux de gris
+                gt_array = gt_array[:, :, 0]  # Prendre le canal rouge comme référence
+            else:
+                gt_array = gt_array.squeeze()
+        
         # Si c'est un masque Cityscapes original, le convertir en 8 classes
         if gt_array.max() > 7:
             gt_array = convert_gt_to_8_classes(gt_array)
+        
+        # S'assurer que le masque est 2D
+        if gt_array.ndim > 2:
+            gt_array = gt_array.squeeze()
         
         # Créer une nouvelle image avec la palette 8 classes
         gt_8classes = Image.fromarray(gt_array.astype(np.uint8), mode='P')
