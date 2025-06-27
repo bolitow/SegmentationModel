@@ -409,17 +409,78 @@ def get_gt_mask(image_id: str):
         print(f"DEBUG: Image mode: {gt_img.mode}")
         print(f"DEBUG: Image size: {gt_img.size}")
         
-        # Convertir l'image en mode approprié selon son type
-        if gt_img.mode == 'RGB' or gt_img.mode == 'RGBA':
-            # Pour les images RGB/RGBA (masques colorés), convertir en mode L (grayscale)
-            gt_img = gt_img.convert('L')
-        elif gt_img.mode == 'P':
-            # Si c'est déjà une image palette, la convertir en mode L pour traitement
-            gt_img = gt_img.convert('L')
+        # Gérer différents types de masques Cityscapes
+        if "_gtFine_color.png" in path:
+            # C'est un masque coloré Cityscapes - on doit le convertir en IDs de classes
+            # Les masques colorés utilisent des couleurs spécifiques pour chaque classe
+            # On va d'abord extraire les IDs depuis les couleurs
+            
+            # Dictionnaire des couleurs Cityscapes vers IDs
+            CITYSCAPES_COLORS_TO_IDS = {
+                (128, 64, 128): 7,    # road
+                (244, 35, 232): 8,    # sidewalk
+                (250, 170, 160): 9,   # parking
+                (230, 150, 140): 10,  # rail track
+                (70, 70, 70): 11,     # building
+                (102, 102, 156): 12,  # wall
+                (190, 153, 153): 13,  # fence
+                (153, 153, 153): 17,  # pole
+                (250, 170, 30): 19,   # traffic light
+                (220, 220, 0): 20,    # traffic sign
+                (107, 142, 35): 21,   # vegetation
+                (152, 251, 152): 22,  # terrain
+                (70, 130, 180): 23,   # sky
+                (220, 20, 60): 24,    # person
+                (255, 0, 0): 25,      # rider
+                (0, 0, 142): 26,      # car
+                (0, 0, 70): 27,       # truck
+                (0, 60, 100): 28,     # bus
+                (0, 80, 100): 31,     # train
+                (0, 0, 230): 32,      # motorcycle
+                (119, 11, 32): 33,    # bicycle
+                (0, 0, 0): 0,         # unlabeled
+                (81, 0, 81): 6,       # ground
+                (150, 100, 100): 15,  # bridge
+                (180, 165, 180): 14,  # guard rail
+                (150, 120, 90): 16,   # tunnel
+                (153, 153, 153): 18,  # polegroup
+                (111, 74, 0): 4,      # static
+                (255, 255, 255): -1,  # license plate
+                (0, 0, 90): 29,       # caravan
+                (0, 0, 110): 30,      # trailer
+                (111, 74, 0): 5,      # dynamic
+                (0, 0, 142): 1,       # ego vehicle
+                (0, 0, 0): 2,         # rectification border
+                (0, 0, 0): 3          # out of roi
+            }
+            
+            # Convertir en RGB si nécessaire
+            if gt_img.mode != 'RGB':
+                gt_img = gt_img.convert('RGB')
+                
+            rgb_array = np.array(gt_img)
+            height, width = rgb_array.shape[:2]
+            gt_array = np.zeros((height, width), dtype=np.uint8)
+            
+            # Mapper chaque couleur vers son ID Cityscapes
+            for color, cs_id in CITYSCAPES_COLORS_TO_IDS.items():
+                mask = np.all(rgb_array == color, axis=2)
+                gt_array[mask] = cs_id
+                
+        elif "_gtFine_labelIds.png" in path or gt_img.mode in ['L', 'I']:
+            # C'est déjà un masque avec IDs de classes
+            if gt_img.mode == 'I':
+                gt_array = np.array(gt_img, dtype=np.int32)
+            else:
+                gt_array = np.array(gt_img)
+        else:
+            # Autre type de masque - essayer de le traiter comme un masque d'IDs
+            if gt_img.mode == 'P':
+                gt_img = gt_img.convert('L')
+            gt_array = np.array(gt_img)
         
-        # Convertir en array numpy
-        gt_array = np.array(gt_img)
         print(f"DEBUG: Array shape après conversion: {gt_array.shape}")
+        print(f"DEBUG: Array unique values: {np.unique(gt_array)}")
         print(f"DEBUG: Array min/max: {gt_array.min()}/{gt_array.max()}")
         
         # S'assurer que c'est bien un array 2D
@@ -429,14 +490,24 @@ def get_gt_mask(image_id: str):
             if gt_array.ndim != 2:
                 raise ValueError(f"Impossible de convertir l'array en 2D. Shape: {gt_array.shape}")
         
-        # Si c'est un masque Cityscapes original, le convertir en 8 classes
-        if gt_array.max() > 7:
-            print("DEBUG: Converting Cityscapes IDs to 8 classes")
-            gt_array = convert_gt_to_8_classes(gt_array)
+        # Convertir les IDs Cityscapes en 8 macro-classes
+        print("DEBUG: Converting Cityscapes IDs to 8 classes")
+        gt_array_8classes = convert_gt_to_8_classes(gt_array)
+        
+        # Vérifier la distribution des classes après conversion
+        unique_classes = np.unique(gt_array_8classes)
+        print(f"DEBUG: Classes après conversion (8 classes): {unique_classes}")
+        for cls in unique_classes:
+            count = np.sum(gt_array_8classes == cls)
+            print(f"  - Classe {cls} ({MACRO_CLASS_NAMES[cls]}): {count} pixels")
         
         # Créer une nouvelle image avec la palette 8 classes
-        gt_8classes = Image.fromarray(gt_array.astype(np.uint8), mode='P')
+        gt_8classes = Image.fromarray(gt_array_8classes.astype(np.uint8), mode='P')
         gt_8classes.putpalette(PALETTE_8_CLASSES)
+        
+        # Vérifier que la palette est bien appliquée
+        print(f"DEBUG: Image finale mode: {gt_8classes.mode}")
+        print(f"DEBUG: Palette length: {len(gt_8classes.getpalette()) if gt_8classes.mode == 'P' else 0}")
         
         # Retourner l'image
         buf = io.BytesIO()
@@ -619,3 +690,96 @@ async def predict_with_debug(file: UploadFile = File(...)):
     result["mask_base64"] = base64.b64encode(buf.getvalue()).decode('utf-8')
     
     return result
+
+@app.get("/debug/mask/{image_id}")
+def debug_gt_mask(image_id: str):
+    """
+    Debug endpoint pour analyser le masque GT et sa conversion
+    """
+    # Essayer différents chemins de fichiers
+    possible_paths = [
+        os.path.join(DATA_DIR, "masks", f"{image_id}.png"),
+        os.path.join(DATA_DIR, "masks", f"{image_id}_gtFine_color.png"),
+        os.path.join(DATA_DIR, "masks", f"{image_id}_gtFine_labelIds.png")
+    ]
+    
+    path = None
+    for p in possible_paths:
+        if os.path.exists(p):
+            path = p
+            break
+    
+    if path is None:
+        raise HTTPException(404, f"Masque GT non trouvé pour {image_id}")
+    
+    try:
+        # Lire le masque GT
+        gt_img = Image.open(path)
+        
+        debug_info = {
+            "file_path": path,
+            "image_mode": gt_img.mode,
+            "image_size": gt_img.size,
+            "file_type": "color" if "_gtFine_color.png" in path else "labelIds" if "_gtFine_labelIds.png" in path else "unknown"
+        }
+        
+        # Analyser selon le type
+        if "_gtFine_color.png" in path:
+            # Analyser les couleurs uniques dans l'image
+            if gt_img.mode != 'RGB':
+                gt_img = gt_img.convert('RGB')
+            rgb_array = np.array(gt_img)
+            
+            # Trouver toutes les couleurs uniques
+            unique_colors = np.unique(rgb_array.reshape(-1, 3), axis=0)
+            debug_info["unique_colors_count"] = len(unique_colors)
+            debug_info["unique_colors"] = [tuple(color) for color in unique_colors[:20]]  # Limiter à 20
+            
+        else:
+            # Masque avec IDs
+            if gt_img.mode == 'P':
+                gt_img = gt_img.convert('L')
+            gt_array = np.array(gt_img)
+            unique_ids = np.unique(gt_array)
+            debug_info["unique_ids"] = unique_ids.tolist()
+            debug_info["id_range"] = f"{gt_array.min()} - {gt_array.max()}"
+        
+        # Convertir en 8 classes
+        if "_gtFine_color.png" in path:
+            # Pour les masques colorés, utiliser la conversion couleur -> ID -> 8 classes
+            rgb_array = np.array(gt_img.convert('RGB'))
+            height, width = rgb_array.shape[:2]
+            gt_array = np.zeros((height, width), dtype=np.uint8)
+            
+            # Mapper les couleurs vers les IDs (simplifié pour le debug)
+            # On va juste montrer la conversion finale
+            gt_array_8classes = convert_gt_to_8_classes(gt_array)
+        else:
+            gt_array = np.array(gt_img.convert('L') if gt_img.mode == 'P' else gt_img)
+            gt_array_8classes = convert_gt_to_8_classes(gt_array)
+        
+        # Analyser la distribution après conversion
+        unique_classes_8 = np.unique(gt_array_8classes)
+        class_distribution = {}
+        for cls in unique_classes_8:
+            count = np.sum(gt_array_8classes == cls)
+            class_distribution[int(cls)] = {
+                "name": MACRO_CLASS_NAMES[cls],
+                "pixel_count": int(count),
+                "percentage": float(count / gt_array_8classes.size * 100),
+                "color": MACRO_CLASS_COLORS[cls]
+            }
+        
+        debug_info["converted_to_8_classes"] = {
+            "unique_classes": unique_classes_8.tolist(),
+            "class_distribution": class_distribution
+        }
+        
+        return debug_info
+        
+    except Exception as e:
+        import traceback
+        return {
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }
