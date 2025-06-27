@@ -377,64 +377,51 @@ def get_image(image_id: str):
 @app.get("/masks/{image_id}")
 def get_gt_mask(image_id: str):
     """Récupère le masque ground truth avec conversion en 8 classes"""
-    path = os.path.join(DATA_DIR, "masks", f"{image_id}.png")
-    print(f"DEBUG: Tentative d'accès au masque: {path}")
-    print(f"DEBUG: Le fichier existe: {os.path.exists(path)}")
+    # Essayer différents chemins de fichiers
+    possible_paths = [
+        os.path.join(DATA_DIR, "masks", f"{image_id}.png"),
+        os.path.join(DATA_DIR, "masks", f"{image_id}_gtFine_color.png"),
+        os.path.join(DATA_DIR, "masks", f"{image_id}_gtFine_labelIds.png")
+    ]
     
-    if not os.path.exists(path):
-        print(f"DEBUG: Fichier non trouvé, liste des fichiers disponibles:")
+    path = None
+    for p in possible_paths:
+        if os.path.exists(p):
+            path = p
+            break
+    
+    if path is None:
+        # Liste des fichiers disponibles pour debug
         try:
             mask_files = os.listdir(os.path.join(DATA_DIR, "masks"))
-            print(f"DEBUG: Fichiers dans masks/: {mask_files}")
-        except Exception as e:
-            print(f"DEBUG: Erreur lors de la lecture du répertoire: {e}")
-        raise HTTPException(404, "Masque GT non trouvé")
+            available_files = [f for f in mask_files if image_id in f]
+        except:
+            available_files = []
+        
+        raise HTTPException(404, f"Masque GT non trouvé pour {image_id}. Fichiers disponibles: {available_files}")
     
     try:
-        print(f"DEBUG: Ouverture de l'image: {path}")
         # Lire le masque GT
         gt_img = Image.open(path)
-        print(f"DEBUG: Image ouverte - Mode: {gt_img.mode}, Taille: {gt_img.size}")
         
-        # Vérifier si le masque est déjà en 8 classes (mode P avec notre palette)
-        current_palette = gt_img.getpalette()
-        print(f"DEBUG: Palette actuelle: {current_palette is not None}")
-        
-        if gt_img.mode == 'P' and current_palette is not None:
-            # Comparer les palettes de manière plus robuste
-            if len(current_palette) == len(PALETTE_8_CLASSES) and current_palette == PALETTE_8_CLASSES:
-                print("DEBUG: Masque déjà en format 8 classes, retour direct")
-                with open(path, "rb") as f:
-                    return Response(f.read(), media_type="image/png")
-        
-        print("DEBUG: Conversion du masque nécessaire")
-        # Sinon, convertir le masque
+        # Convertir le masque
         gt_array = np.array(gt_img)
-        print(f"DEBUG: Array shape: {gt_array.shape}, dtype: {gt_array.dtype}, min: {gt_array.min()}, max: {gt_array.max()}")
         
         # Si c'est un masque Cityscapes original, le convertir en 8 classes
-        if gt_array.max() > 7:  # Probablement un masque Cityscapes original
-            print("DEBUG: Conversion Cityscapes -> 8 classes")
+        if gt_array.max() > 7:
             gt_array = convert_gt_to_8_classes(gt_array)
-            print(f"DEBUG: Après conversion - shape: {gt_array.shape}, min: {gt_array.min()}, max: {gt_array.max()}")
         
         # Créer une nouvelle image avec la palette 8 classes
-        print("DEBUG: Création de l'image finale")
         gt_8classes = Image.fromarray(gt_array.astype(np.uint8), mode='P')
         gt_8classes.putpalette(PALETTE_8_CLASSES)
         
         # Retourner l'image
-        print("DEBUG: Sauvegarde en mémoire")
         buf = io.BytesIO()
         gt_8classes.save(buf, format="PNG")
         buf.seek(0)
-        print("DEBUG: Retour de la réponse")
         return Response(buf.getvalue(), media_type="image/png")
         
     except Exception as e:
-        print(f"DEBUG: Exception capturée: {type(e).__name__}: {str(e)}")
-        import traceback
-        print(f"DEBUG: Traceback: {traceback.format_exc()}")
         raise HTTPException(500, f"Erreur lors du traitement du masque: {str(e)}")
 
 @app.post("/predict")
