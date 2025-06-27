@@ -454,18 +454,23 @@ def get_gt_mask(image_id: str):
                 (0, 0, 0): 3          # out of roi
             }
             
-            # Convertir en RGB si nécessaire
-            if gt_img.mode != 'RGB':
-                gt_img = gt_img.convert('RGB')
+            # Convertir en RGB (ignorer le canal alpha si présent)
+            gt_img = gt_img.convert('RGB')
                 
             rgb_array = np.array(gt_img)
+            print(f"DEBUG: RGB array shape after conversion: {rgb_array.shape}")
+            
+            # S'assurer que c'est bien un array 3D avec 3 canaux
+            if rgb_array.ndim != 3 or rgb_array.shape[2] != 3:
+                raise ValueError(f"Invalid RGB array shape: {rgb_array.shape}")
+                
             height, width = rgb_array.shape[:2]
             gt_array = np.zeros((height, width), dtype=np.uint8)
             
             # Mapper chaque couleur vers son ID Cityscapes
             for color, cs_id in CITYSCAPES_COLORS_TO_IDS.items():
                 mask = np.all(rgb_array == color, axis=2)
-                gt_array[mask] = cs_id
+                gt_array[mask] = cs_id if cs_id >= 0 else 0  # Remplacer -1 par 0
                 
         elif "_gtFine_labelIds.png" in path or gt_img.mode in ['L', 'I']:
             # C'est déjà un masque avec IDs de classes
@@ -475,8 +480,17 @@ def get_gt_mask(image_id: str):
                 gt_array = np.array(gt_img)
         else:
             # Autre type de masque - essayer de le traiter comme un masque d'IDs
-            if gt_img.mode == 'P':
+            # Gérer tous les modes possibles
+            if gt_img.mode == 'RGBA':
+                # Si RGBA, ignorer le canal alpha
+                gt_img = gt_img.convert('RGB').convert('L')
+            elif gt_img.mode == 'RGB':
+                # Si RGB, convertir en niveaux de gris
                 gt_img = gt_img.convert('L')
+            elif gt_img.mode == 'P':
+                # Si palette, convertir en niveaux de gris
+                gt_img = gt_img.convert('L')
+            
             gt_array = np.array(gt_img)
         
         print(f"DEBUG: Array shape après conversion: {gt_array.shape}")
