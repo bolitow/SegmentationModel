@@ -1,6 +1,6 @@
 import os, io, glob
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Tuple
 from fastapi import FastAPI, UploadFile, File, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
@@ -8,17 +8,135 @@ import numpy as np
 import tensorflow as tf
 from sklearn.metrics import jaccard_score, accuracy_score
 import time
+import base64
 
 # ──────────────────────────────────────────────
-# Chargement des modèles disponibles
+# Configuration
 # ──────────────────────────────────────────────
-MODELS_DIR = os.getenv("MODELS_DIR", "models")
-IMG_SIZE = (1024, 512)  # même taille que dans le notebook
+BASE_DIR = Path(__file__).parent.parent
+MODELS_DIR = os.getenv("MODELS_DIR", str(BASE_DIR / "api" / "models"))
+DATA_DIR = os.getenv("DATA_DIR", str(BASE_DIR / "api" / "data"))
+IMG_SIZE = (1024, 512)
 
-# Dictionnaire des modèles chargés
+print(f"BASE_DIR: {BASE_DIR}")
+print(f"MODELS_DIR: {MODELS_DIR}")
+print(f"DATA_DIR: {DATA_DIR}")
+print(f"Modèles trouvés: {glob.glob(os.path.join(MODELS_DIR, '*.keras'))}")
+
+# ──────────────────────────────────────────────
+# Configuration des 8 macro-classes
+# ──────────────────────────────────────────────
+
+# Nombre de classes après réduction
+N_CLASSES = 8
+
+# Noms des 8 macro-classes
+MACRO_CLASS_NAMES = [
+    "Route/Trottoir",  # 0
+    "Construction",    # 1
+    "Objet",          # 2
+    "Nature",         # 3
+    "Ciel",           # 4
+    "Humain",         # 5
+    "Véhicule",       # 6
+    "Void"            # 7
+]
+
+# Palette de couleurs pour les 8 macro-classes
+# J'ai choisi des couleurs distinctes et représentatives pour chaque classe
+MACRO_CLASS_COLORS = [
+    (128, 64, 128),   # 0 - Route/Trottoir : violet/mauve
+    (70, 70, 70),     # 1 - Construction : gris foncé
+    (220, 220, 0),    # 2 - Objet : jaune (panneaux, feux)
+    (107, 142, 35),   # 3 - Nature : vert
+    (70, 130, 180),   # 4 - Ciel : bleu ciel
+    (220, 20, 60),    # 5 - Humain : rouge
+    (0, 0, 142),      # 6 - Véhicule : bleu foncé
+    (0, 0, 0)         # 7 - Void : noir
+]
+
+# Mapping des IDs Cityscapes originaux vers les 8 macro-classes
+# Ce mapping est extrait directement de votre notebook
+CS2MACRO = {
+    # Route/Trottoir (classe 0)
+    7: 0,   # road
+    8: 0,   # sidewalk
+    9: 0,   # parking
+    10: 0,  # rail track
+    6: 0,   # ground
+    
+    # Construction (classe 1)
+    11: 1,  # building
+    12: 1,  # wall
+    13: 1,  # fence
+    15: 1,  # bridge
+    14: 1,  # guard rail
+    16: 1,  # tunnel
+    
+    # Objet (classe 2)
+    17: 2,  # pole
+    19: 2,  # traffic light
+    20: 2,  # traffic sign
+    18: 2,  # polegroup
+    4: 2,   # static
+    
+    # Nature (classe 3)
+    21: 3,  # vegetation
+    22: 3,  # terrain
+    
+    # Ciel (classe 4)
+    23: 4,  # sky
+    
+    # Humain (classe 5)
+    24: 5,  # person
+    25: 5,  # rider
+    
+    # Véhicule (classe 6)
+    26: 6,  # car
+    27: 6,  # truck
+    28: 6,  # bus
+    31: 6,  # train
+    32: 6,  # motorcycle
+    33: 6,  # bicycle
+    1: 6,   # ego vehicle
+    -1: 6,  # license plate
+    29: 6,  # caravan
+    30: 6,  # trailer
+    5: 6,   # dynamic
+    
+    # Void (classe 7)
+    0: 7,   # unlabeled
+    2: 7,   # rectification border
+    3: 7    # out of roi
+}
+
+def create_palette_for_8_classes():
+    """
+    Crée une palette PIL pour les 8 macro-classes.
+    La palette doit contenir 256*3 valeurs (RGB pour chaque index de 0 à 255).
+    """
+    palette = []
+    
+    for i in range(256):
+        if i < N_CLASSES:
+            # Utiliser la couleur définie pour cette macro-classe
+            color = MACRO_CLASS_COLORS[i]
+        else:
+            # Noir pour les indices non utilisés
+            color = (0, 0, 0)
+        
+        palette.extend(color)
+    
+    return palette
+
+# Créer la palette une seule fois
+PALETTE_8_CLASSES = create_palette_for_8_classes()
+
+# ──────────────────────────────────────────────
+# Gestion des modèles
+# ──────────────────────────────────────────────
 loaded_models = {}
 current_model_name = None
-
 
 def load_available_models():
     global loaded_models, current_model_name
@@ -27,134 +145,210 @@ def load_available_models():
     for model_path in model_files:
         model_name = os.path.splitext(os.path.basename(model_path))[0]
         try:
-            loaded_models[model_name] = tf.keras.models.load_model(model_path, compile=False)
+            model = tf.keras.models.load_model(model_path, compile=False)
+            loaded_models[model_name] = model
+            
             if current_model_name is None:
                 current_model_name = model_name
+            
+            # Vérifier que le modèle a bien 8 classes en sortie
+            output_shape = model.output_shape
+            if len(output_shape) >= 4:  # (batch, height, width, classes)
+                num_classes = output_shape[-1]
+                print(f"Modèle {model_name} chargé - Nombre de classes en sortie: {num_classes}")
+                if num_classes != N_CLASSES:
+                    print(f"⚠️  Attention: Le modèle prédit {num_classes} classes au lieu de {N_CLASSES}")
+            
         except Exception as e:
             print(f"Erreur lors du chargement du modèle {model_name}: {e}")
 
     return loaded_models
 
-
-# Charger tous les modèles au démarrage
+# Charger les modèles au démarrage
 load_available_models()
-
 
 def get_current_model():
     return loaded_models.get(current_model_name) if current_model_name else None
 
-
-DATA_DIR = os.getenv("DATA_DIR", "data")  # images & masques GT
-
-# 1) Palette Cityscapes trainId (25 couleurs indexées 0…24)
-CITYSCAPES_TRAINID_PALETTE = [
-    (128, 64, 128),  # 0 road
-    (244, 35, 232),  # 1 sidewalk
-    (250, 170, 160),  # 2 parking
-    (230, 150, 140),  # 3 rail track
-    (70, 70, 70),  # 4 building
-    (102, 102, 156),  # 5 wall
-    (190, 153, 153),  # 6 fence
-    (180, 165, 180),  # 7 guard rail
-    (150, 100, 100),  # 8 bridge
-    (150, 120, 90),  # 9 tunnel
-    (153, 153, 153),  # 10 pole
-    (153, 153, 153),  # 11 polegroup
-    (250, 170, 30),  # 12 traffic light
-    (220, 220, 0),  # 13 traffic sign
-    (107, 142, 35),  # 14 vegetation
-    (152, 251, 152),  # 15 terrain
-    (70, 130, 180),  # 16 sky
-    (220, 20, 60),  # 17 person
-    (255, 0, 0),  # 18 rider
-    (0, 0, 142),  # 19 car
-    (0, 0, 70),  # 20 truck
-    (0, 60, 100),  # 21 bus
-    (0, 80, 100),  # 22 train
-    (0, 0, 230),  # 23 motorcycle
-    (119, 11, 32),  # 24 bicycle
-]
-
-# 1) Aplatir la liste de tuples en une seule liste d'entiers
-flat_palette = []
-for color in CITYSCAPES_TRAINID_PALETTE:
-    flat_palette.extend(color)
-flat_palette.extend([0] * (256 * 3 - len(flat_palette)))
-
+# ──────────────────────────────────────────────
+# Fonctions de traitement d'image
+# ──────────────────────────────────────────────
 
 def preprocess(img: Image.Image) -> np.ndarray:
+    """
+    Prépare l'image pour la prédiction.
+    Redimensionne et normalise l'image.
+    """
     img = img.resize(IMG_SIZE, Image.BILINEAR)
     arr = np.asarray(img, dtype=np.float32) / 255.0
     return np.expand_dims(arr, 0)
 
-
-def postprocess(mask: np.ndarray, image_id: str) -> Image.Image:
-    mask = np.squeeze(mask)
+def postprocess(mask: np.ndarray, debug_info: bool = False) -> Tuple[Image.Image, Dict]:
+    """
+    Convertit la sortie du modèle (8 classes) en image masque colorée.
+    
+    Args:
+        mask: Sortie du modèle - shape (1, H, W, 8) avec probabilités
+        debug_info: Si True, retourne des informations de debug
+    
+    Returns:
+        Image PIL colorée et dictionnaire d'informations de debug
+    """
+    # Enlever la dimension batch
+    mask = np.squeeze(mask)  # (H, W, 8)
+    
+    # Si le masque a 3 dimensions (H, W, C), prendre l'argmax pour obtenir les indices de classe
     if mask.ndim == 3:
-        mask = np.argmax(mask, axis=-1)
+        mask = np.argmax(mask, axis=-1)  # (H, W) avec valeurs 0-7
+    
+    # S'assurer que les valeurs sont bien entre 0 et 7
+    mask = np.clip(mask, 0, N_CLASSES - 1)
+    
+    # Convertir en uint8
     mask = mask.astype(np.uint8)
+    
+    # Créer des informations de debug si demandé
+    debug_data = {}
+    if debug_info:
+        unique_classes = np.unique(mask)
+        debug_data['unique_predicted_classes'] = unique_classes.tolist()
+        debug_data['class_distribution'] = {
+            int(cls): {
+                'name': MACRO_CLASS_NAMES[cls],
+                'pixel_count': int(np.sum(mask == cls)),
+                'percentage': float(np.sum(mask == cls) / mask.size * 100)
+            }
+            for cls in unique_classes
+        }
+    
+    # Créer l'image en mode palette
+    pred_img = Image.fromarray(mask, mode="P")
+    
+    # Appliquer la palette de couleurs pour les 8 classes
+    pred_img.putpalette(PALETTE_8_CLASSES)
+    
+    return pred_img, debug_data
 
-    pred = Image.fromarray(mask, mode="P")
-
-    # tentative de copier la palette du GT coloré…
-    gt_path = os.path.join(DATA_DIR, "masks", f"{image_id}_gtFine_color.png")
-    if os.path.exists(gt_path):
-        gt = Image.open(gt_path)
-        palette = gt.getpalette()
-        if palette is None:
-            # si None (mode RGB), on retombe sur la palette statique
-            palette = flat_palette
-    else:
-        palette = flat_palette
-
-    pred.putpalette(palette)
-    return pred
-
+def convert_gt_to_8_classes(gt_mask: np.ndarray) -> np.ndarray:
+    """
+    Convertit un masque GT Cityscapes (avec IDs originaux) vers les 8 macro-classes.
+    Utilise le mapping CS2MACRO.
+    """
+    # Créer un masque de sortie avec la valeur par défaut 7 (Void)
+    macro_mask = np.full_like(gt_mask, 7, dtype=np.uint8)
+    
+    # Appliquer le mapping pour chaque ID Cityscapes
+    for cityscapes_id, macro_id in CS2MACRO.items():
+        macro_mask[gt_mask == cityscapes_id] = macro_id
+    
+    return macro_mask
 
 def calculate_metrics(gt_mask: np.ndarray, pred_mask: np.ndarray) -> Dict[str, float]:
-    """Calcule les métriques de performance entre GT et prédiction"""
+    """
+    Calcule les métriques entre le GT et la prédiction.
+    Les deux masques doivent être en format 8 classes.
+    """
+    # S'assurer que les deux masques sont 2D
+    if gt_mask.ndim > 2:
+        gt_mask = gt_mask.squeeze()
+    if pred_mask.ndim > 2:
+        pred_mask = pred_mask.squeeze()
+    
+    # S'assurer qu'ils ont la même forme
+    if gt_mask.shape != pred_mask.shape:
+        # Redimensionner le GT si nécessaire
+        gt_img = Image.fromarray(gt_mask.astype(np.uint8), mode='L')
+        gt_img = gt_img.resize((pred_mask.shape[1], pred_mask.shape[0]), Image.NEAREST)
+        gt_mask = np.array(gt_img)
+    
     gt_flat = gt_mask.flatten()
     pred_flat = pred_mask.flatten()
 
+    # Accuracy globale
     accuracy = accuracy_score(gt_flat, pred_flat)
-    iou = jaccard_score(gt_flat, pred_flat, average='weighted')
+    
+    # IoU par classe
+    iou_per_class = {}
+    for cls in range(N_CLASSES):
+        gt_binary = (gt_flat == cls)
+        pred_binary = (pred_flat == cls)
+        
+        intersection = np.sum(gt_binary & pred_binary)
+        union = np.sum(gt_binary | pred_binary)
+        
+        if union > 0:
+            iou = float(intersection / union)
+        else:
+            iou = 0.0
+            
+        iou_per_class[MACRO_CLASS_NAMES[cls]] = iou
+    
+    # IoU moyen (en excluant les classes non présentes)
+    ious = [iou for iou in iou_per_class.values() if iou > 0]
+    mean_iou = np.mean(ious) if ious else 0.0
 
     return {
-        "accuracy": accuracy,
-        "iou": iou
+        "accuracy": float(accuracy),
+        "mean_iou": float(mean_iou),
+        "iou_per_class": iou_per_class
     }
 
-
 # ──────────────────────────────────────────────
+# API FastAPI
+# ──────────────────────────────────────────────
+
 app = FastAPI(
-    title="Cityscapes Segmentation API",
-    description="Prédit un masque de segmentation U-Net-MobileNetV2",
+    title="Cityscapes Segmentation API - 8 Classes",
+    description="API de segmentation sémantique avec réduction à 8 macro-classes",
+    version="2.0"
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # front Streamlit hébergé ailleurs
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-
 # ──────────────────────────────────────────────
 # Endpoints
 # ──────────────────────────────────────────────
+
+@app.get("/")
+def root():
+    """Point d'entrée de l'API"""
+    return {
+        "message": "API de segmentation Cityscapes - 8 macro-classes",
+        "classes": MACRO_CLASS_NAMES,
+        "endpoints": {
+            "/models": "Liste des modèles disponibles",
+            "/current_model": "Modèle actuellement sélectionné",
+            "/images": "Liste des images disponibles",
+            "/predict": "Prédire un masque de segmentation",
+            "/predict_with_metrics": "Prédiction avec métriques",
+            "/debug/classes": "Informations sur les classes"
+        }
+    }
 
 @app.get("/models", response_model=List[str])
 def list_models():
     """Retourne la liste des modèles disponibles"""
     return list(loaded_models.keys())
 
-
 @app.get("/current_model")
 def get_current_model_info():
     """Retourne des informations sur le modèle actuellement sélectionné"""
-    return {"model": current_model_name}
-
+    if current_model_name and current_model_name in loaded_models:
+        model = loaded_models[current_model_name]
+        return {
+            "model": current_model_name,
+            "input_shape": list(model.input_shape),
+            "output_shape": list(model.output_shape),
+            "num_classes": model.output_shape[-1] if len(model.output_shape) > 3 else "unknown",
+            "expected_classes": N_CLASSES
+        }
+    return {"model": None, "error": "Aucun modèle sélectionné"}
 
 @app.post("/set_model/{model_name}")
 def set_model(model_name: str):
@@ -165,53 +359,87 @@ def set_model(model_name: str):
     current_model_name = model_name
     return {"message": f"Modèle {model_name} sélectionné", "model": current_model_name}
 
-
 @app.get("/images", response_model=List[str])
 def list_images():
+    """Liste les images disponibles"""
     paths = glob.glob(os.path.join(DATA_DIR, "images", "*.png"))
     return [os.path.splitext(os.path.basename(p))[0] for p in paths]
 
-
 @app.get("/images/{image_id}")
 def get_image(image_id: str):
+    """Récupère une image spécifique"""
     path = os.path.join(DATA_DIR, "images", f"{image_id}.png")
     if not os.path.exists(path):
-        raise HTTPException(404, "Image inconnue")
-    return Response(open(path, "rb").read(), media_type="image/png")
-
+        raise HTTPException(404, "Image non trouvée")
+    with open(path, "rb") as f:
+        return Response(f.read(), media_type="image/png")
 
 @app.get("/masks/{image_id}")
 def get_gt_mask(image_id: str):
+    """Récupère le masque ground truth avec conversion en 8 classes"""
     path = os.path.join(DATA_DIR, "masks", f"{image_id}.png")
     if not os.path.exists(path):
-        raise HTTPException(404, "Masque GT inconnu")
-    return Response(open(path, "rb").read(), media_type="image/png")
-
+        raise HTTPException(404, "Masque GT non trouvé")
+    
+    # Lire le masque GT
+    gt_img = Image.open(path)
+    
+    # Si le masque est déjà en 8 classes (mode P avec notre palette)
+    if gt_img.mode == 'P' and gt_img.getpalette() == PALETTE_8_CLASSES:
+        with open(path, "rb") as f:
+            return Response(f.read(), media_type="image/png")
+    
+    # Sinon, convertir le masque
+    gt_array = np.array(gt_img)
+    
+    # Si c'est un masque Cityscapes original, le convertir en 8 classes
+    if gt_array.max() > 7:  # Probablement un masque Cityscapes original
+        gt_array = convert_gt_to_8_classes(gt_array)
+    
+    # Créer une nouvelle image avec la palette 8 classes
+    gt_8classes = Image.fromarray(gt_array.astype(np.uint8), mode='P')
+    gt_8classes.putpalette(PALETTE_8_CLASSES)
+    
+    # Retourner l'image
+    buf = io.BytesIO()
+    gt_8classes.save(buf, format="PNG")
+    buf.seek(0)
+    return Response(buf.getvalue(), media_type="image/png")
 
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
-    # Vérifier qu'un modèle est disponible
+    """
+    Effectue une prédiction sur une image uploadée.
+    Retourne un masque de segmentation avec 8 classes.
+    """
     model = get_current_model()
     if model is None:
         raise HTTPException(500, "Aucun modèle disponible")
 
-    image_id = Path(file.filename).stem
-
+    # Lire l'image
     raw = await file.read()
     img = Image.open(io.BytesIO(raw)).convert("RGB")
+    
+    # Prétraitement
     x = preprocess(img)
+    
+    # Prédiction
     y = model.predict(x, verbose=0)
-    mask_img = postprocess(y, image_id)
-
+    
+    # Post-traitement
+    mask_img, _ = postprocess(y, debug_info=False)
+    
+    # Retourner l'image
     buf = io.BytesIO()
     mask_img.save(buf, format="PNG")
+    buf.seek(0)
     return Response(buf.getvalue(), media_type="image/png")
-
 
 @app.post("/predict_with_metrics")
 async def predict_with_metrics(file: UploadFile = File(...)):
-    """Fait une prédiction et calcule les métriques si le GT est disponible"""
-    # Vérifier qu'un modèle est disponible
+    """
+    Fait une prédiction et calcule les métriques si le GT est disponible
+    """
     model = get_current_model()
     if model is None:
         raise HTTPException(500, "Aucun modèle disponible")
@@ -228,14 +456,14 @@ async def predict_with_metrics(file: UploadFile = File(...)):
     y = model.predict(x, verbose=0)
     prediction_time = time.time() - start_time
 
-    # Convertir la prédiction en masque
-    pred_mask = np.squeeze(y)
-    if pred_mask.ndim == 3:
-        pred_mask = np.argmax(pred_mask, axis=-1)
+    # Post-traitement pour obtenir le masque prédit
+    pred_img, debug_info = postprocess(y, debug_info=True)
+    pred_mask = np.array(pred_img)
 
     result = {
         "model_used": current_model_name,
-        "prediction_time": prediction_time,
+        "prediction_time": float(prediction_time),
+        "debug_info": debug_info
     }
 
     # Essayer de calculer les métriques si le GT existe
@@ -243,7 +471,17 @@ async def predict_with_metrics(file: UploadFile = File(...)):
     if os.path.exists(gt_path):
         try:
             gt_img = Image.open(gt_path)
-            gt_mask = np.array(gt_img.resize(IMG_SIZE, Image.NEAREST))
+            gt_mask = np.array(gt_img)
+            
+            # Convertir le GT en 8 classes s'il est en format Cityscapes original
+            if gt_mask.max() > 7:
+                gt_mask = convert_gt_to_8_classes(gt_mask)
+            
+            # Redimensionner le GT à la taille de la prédiction
+            if gt_mask.shape != pred_mask.shape:
+                gt_img_resized = Image.fromarray(gt_mask.astype(np.uint8), mode='L')
+                gt_img_resized = gt_img_resized.resize((pred_mask.shape[1], pred_mask.shape[0]), Image.NEAREST)
+                gt_mask = np.array(gt_img_resized)
 
             metrics = calculate_metrics(gt_mask, pred_mask)
             result["metrics"] = metrics
@@ -252,4 +490,87 @@ async def predict_with_metrics(file: UploadFile = File(...)):
     else:
         result["metrics"] = {"error": "Ground truth non disponible"}
 
+    return result
+
+@app.get("/debug/classes")
+def debug_classes():
+    """
+    Affiche les informations sur les 8 macro-classes
+    """
+    class_info = []
+    for i in range(N_CLASSES):
+        color = MACRO_CLASS_COLORS[i]
+        class_info.append({
+            "index": i,
+            "name": MACRO_CLASS_NAMES[i],
+            "color_rgb": color,
+            "color_hex": f"#{color[0]:02x}{color[1]:02x}{color[2]:02x}"
+        })
+    
+    # Ajouter le mapping Cityscapes -> macro-classes
+    cityscapes_mapping = {}
+    for cs_id, macro_id in CS2MACRO.items():
+        if cs_id not in cityscapes_mapping:
+            cityscapes_mapping[cs_id] = {
+                "cityscapes_id": cs_id,
+                "macro_class_id": macro_id,
+                "macro_class_name": MACRO_CLASS_NAMES[macro_id]
+            }
+    
+    return {
+        "num_classes": N_CLASSES,
+        "macro_classes": class_info,
+        "cityscapes_to_macro_mapping": dict(sorted(cityscapes_mapping.items()))
+    }
+
+@app.post("/predict_with_debug")
+async def predict_with_debug(file: UploadFile = File(...)):
+    """
+    Effectue une prédiction avec informations détaillées pour le debug
+    """
+    model = get_current_model()
+    if model is None:
+        raise HTTPException(500, "Aucun modèle disponible")
+
+    image_id = Path(file.filename).stem
+
+    # Lire l'image
+    raw = await file.read()
+    img = Image.open(io.BytesIO(raw)).convert("RGB")
+    
+    # Prétraitement
+    x = preprocess(img)
+    
+    # Prédiction avec timing
+    start_time = time.time()
+    y = model.predict(x, verbose=0)
+    prediction_time = time.time() - start_time
+    
+    # Informations sur la sortie du modèle
+    model_output_info = {
+        "shape": y.shape,
+        "dtype": str(y.dtype),
+        "min_value": float(y.min()),
+        "max_value": float(y.max()),
+        "contains_nan": bool(np.isnan(y).any())
+    }
+    
+    # Post-traitement avec debug
+    mask_img, debug_info = postprocess(y, debug_info=True)
+    
+    # Préparer la réponse
+    result = {
+        "model_used": current_model_name,
+        "prediction_time": float(prediction_time),
+        "image_id": image_id,
+        "model_output_info": model_output_info,
+        "prediction_info": debug_info
+    }
+    
+    # Encoder l'image en base64
+    buf = io.BytesIO()
+    mask_img.save(buf, format="PNG")
+    buf.seek(0)
+    result["mask_base64"] = base64.b64encode(buf.getvalue()).decode('utf-8')
+    
     return result
