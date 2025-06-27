@@ -381,30 +381,35 @@ def get_gt_mask(image_id: str):
     if not os.path.exists(path):
         raise HTTPException(404, "Masque GT non trouvé")
     
-    # Lire le masque GT
-    gt_img = Image.open(path)
-    
-    # Si le masque est déjà en 8 classes (mode P avec notre palette)
-    if gt_img.mode == 'P' and gt_img.getpalette() == PALETTE_8_CLASSES:
-        with open(path, "rb") as f:
-            return Response(f.read(), media_type="image/png")
-    
-    # Sinon, convertir le masque
-    gt_array = np.array(gt_img)
-    
-    # Si c'est un masque Cityscapes original, le convertir en 8 classes
-    if gt_array.max() > 7:  # Probablement un masque Cityscapes original
-        gt_array = convert_gt_to_8_classes(gt_array)
-    
-    # Créer une nouvelle image avec la palette 8 classes
-    gt_8classes = Image.fromarray(gt_array.astype(np.uint8), mode='P')
-    gt_8classes.putpalette(PALETTE_8_CLASSES)
-    
-    # Retourner l'image
-    buf = io.BytesIO()
-    gt_8classes.save(buf, format="PNG")
-    buf.seek(0)
-    return Response(buf.getvalue(), media_type="image/png")
+    try:
+        # Lire le masque GT
+        gt_img = Image.open(path)
+        
+        # Vérifier si le masque est déjà en 8 classes (mode P avec notre palette)
+        current_palette = gt_img.getpalette()
+        if gt_img.mode == 'P' and current_palette is not None and current_palette == PALETTE_8_CLASSES:
+            with open(path, "rb") as f:
+                return Response(f.read(), media_type="image/png")
+        
+        # Sinon, convertir le masque
+        gt_array = np.array(gt_img)
+        
+        # Si c'est un masque Cityscapes original, le convertir en 8 classes
+        if gt_array.max() > 7:  # Probablement un masque Cityscapes original
+            gt_array = convert_gt_to_8_classes(gt_array)
+        
+        # Créer une nouvelle image avec la palette 8 classes
+        gt_8classes = Image.fromarray(gt_array.astype(np.uint8), mode='P')
+        gt_8classes.putpalette(PALETTE_8_CLASSES)
+        
+        # Retourner l'image
+        buf = io.BytesIO()
+        gt_8classes.save(buf, format="PNG")
+        buf.seek(0)
+        return Response(buf.getvalue(), media_type="image/png")
+        
+    except Exception as e:
+        raise HTTPException(500, f"Erreur lors du traitement du masque: {str(e)}")
 
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
